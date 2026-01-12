@@ -5,7 +5,7 @@ const debug = false;
 
 
 
-axios.get('/src/data/data_two.json').then((res) => {
+axios.get('/src/JA/data_two.json').then((res) => {
 
   
   
