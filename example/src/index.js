@@ -1,11 +1,70 @@
 import axios from 'axios';
 import NetGraph, { HIGHLIGHT, SELECTED, UNSELECTED } from '../../src/index';
+import { generateData } from './dataGenerator';
 
 const debug = false;
 
 
 
-axios.get('/src/JA/data_two.json').then((res) => {
+const urlParams = new URLSearchParams(window.location.search);
+const nodeCountParam = urlParams.get('nodeCount');
+const edgeRatioParam = urlParams.get('edgeRatio');
+
+// Setup button listeners
+function setupTestButtons() {
+    const btn100k = document.getElementById('gen100k');
+    if (btn100k) {
+        btn100k.addEventListener('click', () => {
+             const url = new URL(window.location);
+             url.searchParams.set('nodeCount', '100000');
+             window.location.href = url.toString();
+        });
+    }
+    const btn1m = document.getElementById('gen1m');
+    if (btn1m) {
+        btn1m.addEventListener('click', () => {
+             const url = new URL(window.location);
+             url.searchParams.set('nodeCount', '1000000');
+             // Add edge ratio parameter
+             url.searchParams.set('edgeRatio', '0.2');
+             window.location.href = url.toString();
+        });
+    }
+}
+// Try to setup immediately, or wait for load if elements not found (though scripts usually run after body parsing if at end, but here it's likely bundled)
+// If bundled and injected in head, we might need window.onload.
+window.addEventListener('load', setupTestButtons);
+
+
+if (nodeCountParam) {
+    const count = parseInt(nodeCountParam, 10);
+    console.log(`Generating ${count} nodes...`);
+    
+    // Defer to allow UI update
+    setTimeout(() => {
+        console.time('Data Generation');
+        const edgeCount = edgeRatioParam ? Math.floor(count * parseFloat(edgeRatioParam)) : count * 2;
+        const data = generateData(count, edgeCount);
+        console.timeEnd('Data Generation');
+        
+        console.time('NetGraph Render');
+        draw(data);
+        console.timeEnd('NetGraph Render');
+        
+        // Add a visual indicator
+        const statusDiv = document.createElement('div');
+        statusDiv.style.position = 'absolute';
+        statusDiv.style.top = '10px';
+        statusDiv.style.right = '10px';
+        statusDiv.style.background = 'rgba(0,0,0,0.7)';
+        statusDiv.style.color = '#fff';
+        statusDiv.style.padding = '10px';
+        statusDiv.innerText = `Rendered ${count} nodes. Check console for timing.`;
+        document.body.appendChild(statusDiv);
+    }, 100);
+    
+} else {
+    axios.get('/src/JA/data_two.json').then((res) => {
 
   
   
@@ -35,6 +94,7 @@ axios.get('/src/JA/data_two.json').then((res) => {
 
     draw(data);
 });
+}
 function draw(rawData) {
     let data = null;
     if (!debug) {
@@ -1664,6 +1724,5 @@ function draw(rawData) {
     });
 
 }
-
 
 

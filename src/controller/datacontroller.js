@@ -54,14 +54,13 @@ export default class DataController {
         if(this.newData.nodes.length>0||this.newData.links.length>0){
             const newNodes=this.newData.nodes;
             const newLinks=this.newData.links;
-            newNodes.forEach((node)=>{
-                this.data.nodes.push(node);
-            });
-            this.newData.nodes=new Array();
-            newLinks.forEach((link)=>{
-                this.data.links.push(link);
-            });
-            this.newData.links=new Array();
+            
+            // Optimization: Use concat for bulk addition to avoid loop overhead and potential stack overflow
+            this.data.nodes = this.data.nodes.concat(newNodes);
+            this.data.links = this.data.links.concat(newLinks);
+
+            this.newData.nodes=[];
+            this.newData.links=[];
         }
         return this.data;
     }

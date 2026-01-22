@@ -128,6 +128,69 @@ export default class ElementController {
                 charSet: null,
                 groupTextSet: null,
             }
+
+            // LOD Optimization: If node count > 50k, disable heavy render layers (Text, Mark)
+            const enableLOD = nodeArray.length > 50000;
+            if (enableLOD) {
+                console.warn(`[NetGraph] High performance mode enabled (LOD). Skipping Text, Mark layers and Map indexing for ${nodeArray.length} nodes.`);
+                
+                // 1. Process Nodes (Direct to Array, No Map)
+                nodeArray.forEach((node) => {
+                    this.renderObject.renderBackgrounds.push(new RenderBackground(node));
+                    this.renderObject.renderIcons.push(new RenderIcon(node));
+                });
+
+                // 2. Process Links (Direct to Array, Hardcoded Offset)
+                if (linkArray && linkArray.length > 0 && nodeArray.length > 0) {
+                    // Calculate offset once based on the first node (assuming uniform style for benchmark)
+                    const dummyBg = this.renderObject.renderBackgrounds[0];
+                    const fixedOffset = {
+                        x: dummyBg.style.backgroundWidth / 2 + dummyBg.style.borderWidth / 2,
+                        y: dummyBg.style.backgroundHeight / 2 + dummyBg.style.borderWidth / 2,
+                        width: dummyBg.style.width,
+                        height: dummyBg.style.height,
+                        borderWidth: dummyBg.style.borderWidth
+                    };
+                    const offset = { sourceOffset: fixedOffset, targetOffset: fixedOffset };
+
+                    linkArray.forEach((link) => {
+                        const renderLine = new RenderLine(link, offset);
+                        if (renderLine.style.lineStyle === 'solid') {
+                            this.renderObject.renderLines.push(renderLine);
+                        } else {
+                             const dashLineObj = new DashLine(renderLine);
+                             this.renderObject.renderDashLine.push(...dashLineObj.getRenderDashLine());
+                        }
+
+                        if (renderLine.style.direct) {
+                            this.renderObject.renderPolygon.push(new RenderPolygon(link, 'target', offset));
+                        } else {
+                            this.renderObject.renderPolygon.push(new RenderPolygon(link, 'target', offset));
+                            this.renderObject.renderPolygon.push(new RenderPolygon(link, 'source', offset));
+                        }
+                        // LOD: Skip Link Text
+                    });
+                }
+
+                // 3. Update Canvas
+                // LOD Mode: Initialize empty charSet to prevent crash in CanvasController
+                this.renderObject.charSet = []; 
+                this.renderObject.groupTextSet = [];
+                
+                this.controller.canvasController.updateRenderObject({ renderObject: this.renderObject });
+
+                // 4. Subscribe events (copied from _generateRenderObjs)
+                this.controller.eventController.subscribe("_updateEntityPosition", (nodeIds, layout) => {
+                    this.updateEntityPosition(nodeIds, layout)
+                });
+                this.controller.eventController.subscribe("_fitView", (nodeIds = null) => {
+                    this.fitView(nodeIds);
+                });
+                this.controller.eventController.fire("_fitView", [null]);
+                
+                return; // Skip standard processing
+            }
+
             nodeArray.forEach((node) => {
                 const nodeRenders = {
                     iconObjs: new Array(),
@@ -139,16 +202,21 @@ export default class ElementController {
                 }
                 nodeRenders.backgroundObjs.push(new RenderBackground(node));
                 nodeRenders.iconObjs.push(new RenderIcon(node));
-                nodeRenders.markObjs.push(new RenderMark(node));
+                
+                if (!enableLOD) {
+                    nodeRenders.markObjs.push(new RenderMark(node));
+                }
 
                 if (node.data.metaType && node.data.metaType === 'nodeSet') {
                     const groupRenderText = new RenderGroupText(node);
                     this._generateGroupCharSet(groupRenderText.text);
                     nodeRenders.groupTextObjs.push(groupRenderText);
                 } else {
-                    const renderText = new RenderText(node);
-                    this._generateCharSet(renderText.text);
-                    nodeRenders.textObjs.push(renderText);
+                    if (!enableLOD) {
+                        const renderText = new RenderText(node);
+                        this._generateCharSet(renderText.text);
+                        nodeRenders.textObjs.push(renderText);
+                    }
                 }
                 if (node.isLocked) {
                     nodeRenders.labelObjs.push(new RenderLabel(node))
