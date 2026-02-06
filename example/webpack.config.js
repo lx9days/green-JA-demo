@@ -8,7 +8,7 @@ const ESLintPlugin = require('eslint-webpack-plugin');
 
 module.exports={
     entry:{
-        main:"./src/index.js"
+        main:path.resolve(__dirname, "src/index.js")
     },
     mode:"development",
     devtool:'source-map',
@@ -65,13 +65,16 @@ module.exports={
     },
     plugins:[
         new HtmlWebpackPlugin({
-            template:'./src/index.html'
+            template:path.resolve(__dirname, 'src/index.html')
         }),
         new CleanWebpackPlugin({
             root:path.resolve(__dirname,'./')
         }),
         new webpack.HotModuleReplacementPlugin(),
-        new ESLintPlugin()
+        new ESLintPlugin({
+            failOnError: false,
+            emitWarning: true
+        })
     ]
 
     

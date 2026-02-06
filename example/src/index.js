@@ -217,6 +217,7 @@ function draw(rawData) {
             container: 'container',
             maxZoom: 16,
             minZoom: -16,
+            minimap: true,
         },
         constant: {
             nodeHighlightColor: '#a9d9d9',

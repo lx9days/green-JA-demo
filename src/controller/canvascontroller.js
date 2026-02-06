@@ -1,5 +1,5 @@
-import { Deck, COORDINATE_SYSTEM, OrthographicView, Viewport, FlyToInterpolator, LinearInterpolator } from '@deck.gl/core';
-import { ScatterplotLayer, IconLayer, LineLayer, TextLayer, PolygonLayer, SolidPolygonLayer } from '@deck.gl/layers';
+import { Deck, COORDINATE_SYSTEM, OrthographicView, Viewport, FlyToInterpolator, LinearInterpolator, MapView } from '@deck.gl/core';
+import { ScatterplotLayer, IconLayer, LineLayer, TextLayer, PolygonLayer, SolidPolygonLayer, PathLayer } from '@deck.gl/layers';
 import hexRgb from 'hex-rgb';
 import RoundedRectangleLayer from '../compositelayer/RoundedRectangleLayer';
 import BrushCanvas from '../helper/brushCanvas';
@@ -9,6 +9,9 @@ import BrushCanvas from '../helper/brushCanvas';
 //     colorBlue
 // }
 const ICONDIM = 60;
+const MINIMAP_SIZE = 300; // 鹰眼图大小 (px)
+const MINIMAP_MARGIN = 20; // 鹰眼图边距
+
 export default class CanvasController {
     constructor(props, eventController) {
         this.props = props;
@@ -48,6 +51,15 @@ export default class CanvasController {
         this._brushInfoCallBack = this._brushInfoCallBack.bind(this);
         this.onIconErrorHander = this._iconErrorHander.bind(this);
         this.lastHoverElement = null;
+
+        // Minimap state
+        this.minimapViewState = {
+            target: [0, 0, 0],
+            zoom: -3, // Default small zoom
+            rotationX: 0,
+            rotationOrbit: 0
+        };
+        this.dataBounds = null; // Store data bounding box
 
         this._initializeCanvas();
     }
@@ -96,8 +108,17 @@ export default class CanvasController {
         if (this.deck) {
             this.deck = null;
         }
-        this.deck = new Deck({
-            views: new OrthographicView({
+
+        // Initialize minimap view state centered
+        this.minimapViewState = {
+            target: [this.props.containerWidth / 2, this.props.containerHeight / 2, 0],
+            zoom: -3,
+            rotationX: 0,
+            rotationOrbit: 0
+        };
+
+        const views = [
+            new OrthographicView({
                 id: 'globalView',
                 x: 0,
                 y: 0,
@@ -106,11 +127,66 @@ export default class CanvasController {
                 maxZoom: this.props.maxZoom,
                 minZoom: this.props.minZoom,
                 controller: true,
-                doubleClickZoom:false,
-            }),
+                doubleClickZoom: false,
+            })
+        ];
+
+        if (this.props.minimap) {
+            views.push(new OrthographicView({
+                id: 'minimapView',
+                x: this.props.containerWidth - MINIMAP_SIZE - MINIMAP_MARGIN,
+                y: this.props.containerHeight - MINIMAP_SIZE - MINIMAP_MARGIN,
+                width: MINIMAP_SIZE,
+                height: MINIMAP_SIZE,
+                clear: true,
+                controller: {
+                    scrollZoom: true,
+                    dragPan: true,
+                    dragRotate: false,
+                    doubleClickZoom: false,
+                    touchZoom: true,
+                    touchRotate: false,
+                    keyboard: false
+                }
+            }));
+        }
+
+        const viewState = {
+            globalView: this.props.viewState
+        };
+        if (this.props.minimap) {
+            viewState.minimapView = this.minimapViewState;
+        }
+
+        this.deck = new Deck({
+            views: views,
             width: this.props.containerWidth,
             height: this.props.containerHeight,
-            viewState: initViewState,
+            viewState: this.props.minimap ? viewState : this.props.viewState,
+            layerFilter: ({ layer, viewport }) => {
+                if (this.props.minimap) {
+                    // Minimap-only layers
+                    if (layer.id.startsWith('minimap-') || layer.id === 'viewport-frame-layer') {
+                        return viewport.id === 'minimapView';
+                    }
+                    
+                    // Layers that should NOT appear in Minimap (because we have replacements)
+                    const globalOnlyLayers = [
+                        'icon-layer', 
+                        'text-layer', 
+                        'group-text-layer', 
+                        'label-layer',
+                        'node-label-layer'
+                    ];
+                    
+                    if (viewport.id === 'minimapView') {
+                        return !globalOnlyLayers.includes(layer.id);
+                    }
+                    
+                    return viewport.id === 'globalView';
+                }
+                return true;
+            },
             onViewStateChange: this.onViewStateChange,
             gl: this.gl,
             controller: true,
@@ -184,19 +260,89 @@ export default class CanvasController {
         this.props.viewState.maxZoom = Infinity;
     }
 
-    _onViewStateChange({ viewState, oldViewState, interactionState }) {
-        if (this.isAllowCanvasMove && !this.boxSelecting) {
+    _onViewStateChange({ viewId, viewState, oldViewState, interactionState }) {
+        if (viewId === 'minimapView') {
+            // Synchronize minimap interactions to global view
+            // We do NOT update minimapViewState, so it stays fixed
+            
+            // Calculate scale factor between minimap and global view
+            // Since minimap is just a zoomed out version, the delta in world coordinates is the same.
+            // However, interaction feels better if we inverse the direction? No, dragPan moves the camera.
+            // If I drag camera right, viewport moves right, content moves left.
+            // If I want to move the "frame" to the right (to see right content), I need to move camera right.
+            
+            if (interactionState.isZooming) {
+                // Apply zoom delta to global view
+                const zoomDelta = viewState.zoom - oldViewState.zoom;
+                this.props.zoom += zoomDelta;
+                // Update global view zoom
+                this.props.viewState = {
+                    ...this.props.viewState,
+                    zoom: this.props.zoom
+                };
+                this.updateRenderGraph();
+            } else if (interactionState.isPanning) {
+                // Apply pan delta to global view
+                // Reverse direction for minimap interaction to simulate dragging the frame
+                
+                // Ensure we have a start target (in case dragStart was missed or sequence is odd)
+                if (!this.minimapPanStartGlobalTarget) {
+                     this.minimapPanStartGlobalTarget = [...this.props.viewState.target];
+                }
 
+                // Calculate TOTAL delta from the fixed minimap state
+                // viewState.target is the accumulated position from the start of the drag (since oldViewState is fixed)
+                const dx = viewState.target[0] - oldViewState.target[0];
+                const dy = viewState.target[1] - oldViewState.target[1];
+                
+                this.props.viewState = {
+                    ...this.props.viewState,
+                    target: [
+                        this.minimapPanStartGlobalTarget[0] - dx,
+                        this.minimapPanStartGlobalTarget[1] - dy,
+                        0
+                    ]
+                };
+                this.updateRenderGraph();
+            }
+            
+            // Force update to refresh viewport frame
+            this.deck.setProps({
+                viewState: {
+                    globalView: this.props.viewState,
+                    minimapView: this.minimapViewState
+                }
+            });
+            return;
+        }
+
+        if (this.isAllowCanvasMove && !this.boxSelecting) {
+            this.updateRenderGraph(viewState);
         } else {
             if (interactionState.isZooming) {
                 this.props.zoom = viewState.zoom;
-                this.updateRenderGraph();
+                this.updateRenderGraph(viewState);
             } else {
                 viewState.target = oldViewState.target;
             }
         }
         this.props.viewState = viewState;
-        this.deck.setProps({ viewState });
+        
+        // Ensure minimap state is passed
+        if (this.props.minimap) {
+            this.deck.setProps({ 
+                viewState: {
+                    globalView: this.props.viewState,
+                    minimapView: this.minimapViewState
+                }
+            });
+        } else {
+            this.deck.setProps({ 
+                viewState: {
+                    globalView: this.props.viewState
+                }
+            });
+        }
     }
 
     _deckClickHandler(info, e) {
@@ -212,6 +358,10 @@ export default class CanvasController {
             this.isJustDraged=false
         },4000)
         this.isAllowCanvasMove = true;
+
+        if (info && info.viewport && info.viewport.id === 'minimapView') {
+            this.minimapPanStartGlobalTarget = [...this.props.viewState.target];
+        }
     }
 
     _deckDragingHandler(info, e) {
@@ -220,6 +370,7 @@ export default class CanvasController {
 
     _deckDragEndHandler(info, e) {
         this.isAllowCanvasMove = false;
+        this.minimapPanStartGlobalTarget = null;
     }
 
 
@@ -597,34 +748,182 @@ export default class CanvasController {
                 getColor: styleFlag
             }
         });
+
+        // --- Minimap Layers & Logic ---
+        let minimapBackgroundLayer = null;
+        let viewportFrameLayer = null;
+
+        if (this.props.minimap && renderBackgrounds && renderBackgrounds.length > 0) {
+             // Calculate bounds
+             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+             
+             // Consider both backgrounds and icons for bounds
+             const elementsToCheck = [...renderBackgrounds];
+             if (renderIcons) elementsToCheck.push(...renderIcons);
+
+             for (const d of elementsToCheck) {
+                 if (!d.position) continue;
+                 const [x, y] = d.position;
+                 
+                 // Estimate size (radius or half-width/height)
+                 // circleHeight for nodes, iconSize for icons, backgroundWidth for rects
+                 let size = 30; // Default half-size
+                 if (d.style) {
+                     const s = d.style.circleHeight || d.style.backgroundWidth || d.style.iconSize || 60;
+                     size = s / 2;
+                 }
+
+                 if (x - size < minX) minX = x - size;
+                 if (x + size > maxX) maxX = x + size;
+                 if (y - size < minY) minY = y - size;
+                 if (y + size > maxY) maxY = y + size;
+             }
+             
+             // Add padding
+             const padding = 100;
+             minX -= padding;
+             maxX += padding;
+             minY -= padding;
+             maxY += padding;
+             
+             const width = maxX - minX;
+             const height = maxY - minY;
+             
+             if (width > 0 && height > 0) {
+                 const scaleX = MINIMAP_SIZE / width;
+                 const scaleY = MINIMAP_SIZE / height;
+                 const minimapZoom = Math.log2(Math.min(scaleX, scaleY));
+                 
+                 this.minimapViewState = {
+                     target: [(minX + maxX) / 2, (minY + maxY) / 2, 0],
+                     zoom: minimapZoom,
+                     rotationX: 0,
+                     rotationOrbit: 0
+                 };
+             }
+
+             // Minimap Background
+             minimapBackgroundLayer = new SolidPolygonLayer({
+                 id: 'minimap-background-layer',
+                 data: [{ polygon: [[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY]] }],
+                 getPolygon: d => d.polygon,
+                 getFillColor: [240, 240, 240, 255],
+                 stroked: true,
+                 getLineColor: [200, 200, 200, 255],
+                 getLineWidth: 10,
+             });
+
+             // Viewport Frame
+             const { containerWidth, containerHeight, viewState } = this.props;
+             const currentViewState = viewStat || viewState;
+             const currentZoom = currentViewState.zoom;
+             const [tX, tY] = currentViewState.target;
+             
+             const vpW = containerWidth / Math.pow(2, currentZoom);
+             const vpH = containerHeight / Math.pow(2, currentZoom);
+             
+             const framePath = [
+                 [tX - vpW / 2, tY - vpH / 2],
+                 [tX + vpW / 2, tY - vpH / 2],
+                 [tX + vpW / 2, tY + vpH / 2],
+                 [tX - vpW / 2, tY + vpH / 2],
+                 [tX - vpW / 2, tY - vpH / 2]
+             ];
+
+             viewportFrameLayer = new PathLayer({
+                 id: 'viewport-frame-layer',
+                 data: [{ path: framePath }],
+                 coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+                 getPath: d => d.path,
+                 getColor: [255, 0, 0, 200],
+                 getWidth: 3,
+                 widthUnits: 'pixels',
+                 updateTriggers: {
+                     getPath: [tX, tY, currentZoom]
+                 }
+             });
+        }
+        
+        let minimapLayers = [];
+        if (this.props.minimap) {
+            // Clone IconLayer for Minimap (use 'common' units to scale with zoom)
+            minimapLayers.push(new IconLayer({
+                ...iconLayer.props,
+                id: 'minimap-icon-layer',
+                sizeUnits: 'common',
+                sizeScale: 1, // Reset scaling
+                getSize: d => d.style.iconSize || 60,
+                updateTriggers: iconLayer.props.updateTriggers
+            }));
+
+            // Clone TextLayer for Minimap
+            minimapLayers.push(new TextLayer({
+                ...textLayer.props,
+                id: 'minimap-text-layer',
+                sizeUnits: 'common',
+                sizeScale: 1,
+                getSize: d => d.style.textSize || 16,
+                updateTriggers: textLayer.props.updateTriggers
+            }));
+
+            // Clone GroupTextLayer for Minimap
+            minimapLayers.push(new TextLayer({
+                ...groupTextLayer.props,
+                id: 'minimap-group-text-layer',
+                sizeUnits: 'common',
+                sizeScale: 1,
+                getSize: d => d.style.textSize || 16,
+                updateTriggers: groupTextLayer.props.updateTriggers
+            }));
+            
+            // Clone LabelLayer for Minimap
+            minimapLayers.push(new IconLayer({
+                ...labelLayer.props,
+                id: 'minimap-label-layer',
+                sizeUnits: 'common',
+                sizeScale: 1,
+                getSize: d => d.style.iconSize || 20,
+                updateTriggers: labelLayer.props.updateTriggers
+            }));
+
+             // Clone NodeLabelLayer for Minimap
+            minimapLayers.push(new TextLayer({
+                ...nodelabelLayer.props,
+                id: 'minimap-node-label-layer',
+                sizeUnits: 'common',
+                sizeScale: 1,
+                getSize: d => 15,
+                updateTriggers: nodelabelLayer.props.updateTriggers
+            }));
+        }
+
+        const layers = [];
+        if (minimapBackgroundLayer) layers.push(minimapBackgroundLayer);
+        if (minimapLayers.length > 0) layers.push(...minimapLayers);
+        
+        if (bubbleLayer) layers.push(bubbleLayer);
+        layers.push(lineLayer, dashLineLayer, arrowLayer, rectBackgroundLayer, circleEdge, labelLayer, iconLayer, groupTextLayer, textLayer);
+        if (animationLayer) layers.push(animationLayer);
+        layers.push(markLayer, nodelabelLayer);
+        
+        if (viewportFrameLayer) layers.push(viewportFrameLayer);
+
         if (viewStat === null) {
-            if (renderBubble.length > 0 && this.animationData.length > 0) {
-                this.deck.setProps({ width: this.props.containerWidth, height: this.props.containerHeight, layers: [bubbleLayer, lineLayer, dashLineLayer, arrowLayer, rectBackgroundLayer, circleEdge,  labelLayer, iconLayer, groupTextLayer, textLayer, animationLayer, markLayer,
-                nodelabelLayer] });
-            } else if (renderBubble.length > 0) {
-                this.deck.setProps({ width: this.props.containerWidth, height: this.props.containerHeight, layers: [bubbleLayer, lineLayer, dashLineLayer, arrowLayer, rectBackgroundLayer, circleEdge,  labelLayer, iconLayer, groupTextLayer, textLayer, markLayer,
-                    nodelabelLayer] });
-            } else if (this.animationData.length > 0) {
-                this.deck.setProps({ width: this.props.containerWidth, height: this.props.containerHeight, layers: [lineLayer, dashLineLayer, arrowLayer, rectBackgroundLayer, circleEdge,  labelLayer, iconLayer, groupTextLayer, textLayer, animationLayer, markLayer,
-                    nodelabelLayer] });
-            } else {
-                this.deck.setProps({ width: this.props.containerWidth, height: this.props.containerHeight, layers: [lineLayer, dashLineLayer, arrowLayer, rectBackgroundLayer, circleEdge,  labelLayer, iconLayer, groupTextLayer, textLayer, markLayer,
-                    nodelabelLayer] });
-            }
+            this.deck.setProps({ width: this.props.containerWidth, height: this.props.containerHeight, layers });
         } else {
-            if (renderBubble.length > 0 && this.animationData.length > 0) {
-                this.deck.setProps({ viewState: viewStat, width: this.props.containerWidth, height: this.props.containerHeight, layers: [bubbleLayer, lineLayer, dashLineLayer, arrowLayer, rectBackgroundLayer, circleEdge,  labelLayer, iconLayer, groupTextLayer, textLayer, animationLayer, markLayer,
-                    nodelabelLayer] });
-            } else if (renderBubble.length > 0) {
-                this.deck.setProps({ viewState: viewStat, width: this.props.containerWidth, height: this.props.containerHeight, layers: [bubbleLayer, lineLayer, dashLineLayer, arrowLayer, rectBackgroundLayer, circleEdge,  labelLayer, iconLayer, groupTextLayer, textLayer, markLayer,
-                    nodelabelLayer] });
-            } else if (this.animationData.length > 0) {
-                this.deck.setProps({ viewState: viewStat, width: this.props.containerWidth, height: this.props.containerHeight, layers: [lineLayer, dashLineLayer, arrowLayer, rectBackgroundLayer, circleEdge,  labelLayer, iconLayer, groupTextLayer, textLayer, animationLayer, markLayer,
-                    nodelabelLayer] });
-            } else {
-                this.deck.setProps({ viewState: viewStat, width: this.props.containerWidth, height: this.props.containerHeight, layers: [lineLayer, dashLineLayer, arrowLayer, rectBackgroundLayer, circleEdge,  labelLayer, iconLayer, groupTextLayer, textLayer, markLayer,
-                    nodelabelLayer] });
+            const viewState = {
+                globalView: viewStat
+            };
+            if (this.props.minimap) {
+                viewState.minimapView = this.minimapViewState;
             }
+
+            this.deck.setProps({ 
+                viewState: viewState, 
+                width: this.props.containerWidth, 
+                height: this.props.containerHeight, 
+                layers 
+            });
         }
 
 
@@ -1488,8 +1787,9 @@ export default class CanvasController {
         }
         this.props.viewState = initViewState;
         this.props.initTarget = initViewState.target;
-        this.deck.setProps({
-            width: width, height: height, viewState: this.viewState, views: new OrthographicView({
+
+        const views = [
+            new OrthographicView({
                 id: 'globalView',
                 x: 0,
                 y: 0,
@@ -1498,9 +1798,42 @@ export default class CanvasController {
                 maxZoom: this.props.maxZoom,
                 minZoom: this.props.minZoom,
                 controller: true,
-                doubleClickZoom:false,
-            }),
-            viewState: this.props.viewState,
+                doubleClickZoom: false,
+            })
+        ];
+
+        if (this.props.minimap) {
+            views.push(new OrthographicView({
+                id: 'minimapView',
+                x: this.props.containerWidth - MINIMAP_SIZE - MINIMAP_MARGIN,
+                y: this.props.containerHeight - MINIMAP_SIZE - MINIMAP_MARGIN,
+                width: MINIMAP_SIZE,
+                height: MINIMAP_SIZE,
+                clear: true,
+                controller: {
+                    scrollZoom: true,
+                    dragPan: true,
+                    dragRotate: false,
+                    doubleClickZoom: false,
+                    touchZoom: true,
+                    touchRotate: false,
+                    keyboard: false
+                }
+            }));
+        }
+
+        const viewState = {
+            globalView: this.props.viewState
+        };
+        if (this.props.minimap) {
+            viewState.minimapView = this.minimapViewState;
+        }
+
+        this.deck.setProps({
+            width: width, 
+            height: height, 
+            views: views,
+            viewState: this.props.minimap ? viewState : this.props.viewState,
         })
 
         this.deck.redraw(true);
